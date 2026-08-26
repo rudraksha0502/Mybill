@@ -11,5 +11,5 @@
  * get your own Client ID and enable Google Drive sync.
  */
 window.MYBILL_CONFIG = {
-  GOOGLE_CLIENT_ID: 'YOUR_CLIENT_ID.apps.googleusercontent.com'
+  GOOGLE_CLIENT_ID: '1036071614097-04h72mruolofhqmaibjghoth105db5kd.apps.googleusercontent.com'
 };
