@@ -114,6 +114,7 @@
         </nav>
         <div class="sync-pill" id="sync-pill">●&nbsp;Local only</div>
       </aside>
+      <div class="sidebar-overlay only-mobile"></div>
       <div class="main-col">
         <header class="topbar">
           <button id="hamburger" class="icon-btn only-mobile" aria-label="Menu">☰</button>
@@ -142,7 +143,13 @@
     });
     document.getElementById('quick-add-btn').addEventListener('click', (e) => { e.preventDefault(); openQuickAddSheet(); });
     document.getElementById('global-search').addEventListener('input', onSearchInput);
-    document.getElementById('hamburger').addEventListener('click', () => document.querySelector('.sidebar').classList.toggle('open'));
+    const sidebar = document.querySelector('.sidebar');
+    const overlay = document.querySelector('.sidebar-overlay');
+    const closeSidebar = () => sidebar.classList.remove('open');
+    document.getElementById('hamburger').addEventListener('click', () => sidebar.classList.toggle('open'));
+    overlay.addEventListener('click', closeSidebar);
+    sidebar.querySelectorAll('.side-link').forEach(link => link.addEventListener('click', closeSidebar));
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeSidebar(); });
     updateNetStatus();
   }
 
