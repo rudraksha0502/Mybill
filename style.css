@@ -142,6 +142,15 @@ input, select { font-family: inherit; }
 .filter-bar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 14px; }
 .filter-bar input, .filter-bar select { padding: 8px 10px; border-radius: 8px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); }
 .card-actions { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+
+/* ---------- Budget envelopes ---------- */
+.env-card { cursor: pointer; transition: box-shadow 0.15s ease, transform 0.1s ease; }
+.env-card:hover, .env-card:focus { box-shadow: 0 2px 4px rgba(20,30,25,0.08), 0 10px 26px rgba(20,30,25,0.09); outline: none; }
+.env-card:active { transform: translateY(1px); }
+.detail-title-row { display: flex; align-items: center; gap: 10px; }
+.detail-title-row h1 { margin: 0; }
+.cat-budget-row { display: flex; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 0.9rem; }
+.cat-budget-row:last-child { border-bottom: none; }
 .whatif-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 
 /* ---------- Modals ---------- */

@@ -52,7 +52,8 @@ const DEFAULT_STATE = () => ({
   categories: DEFAULT_CATEGORIES,
   transactions: [],   // see TX shape below
   people: [],         // {id, name, note, createdAt}
-  budgets: [],        // {id, category, monthlyAmount}
+  budgets: [],        // {id, category, monthlyAmount} — legacy monthly category-cap budgets, kept as-is
+  envelopes: [],      // {id, name, initialAmount, category, description, startDate, endDate, color, notes, createdAt, updatedAt} — new budget-as-account feature
   goals: [],          // {id, name, target, saved, deadline, monthlyContribution}
   recurring: [],      // {id, name, amount, category, account, frequency, nextDate, kind: 'expense'|'subscription'|'bill', active}
   settings: {
@@ -79,6 +80,9 @@ const DEFAULT_STATE = () => ({
    needWant: 'need'|'want'|null,
    recurringId,
    splitGroupId,         // links a bill-split's generated lend transactions
+   envelopeId,           // links this transaction to a Budget Envelope (see Envelopes section below)
+   envelopeKind: 'expense'|'addition', // only set when envelopeId is set — which side of the envelope ledger this is
+   paymentMethod, receipt, // receipt: {name, dataUrl} — small optional image/file reference
    createdAt, updatedAt
  }
 */
@@ -267,6 +271,148 @@ class Store {
         pct: b.monthlyAmount > 0 ? Math.min(999, Math.round((spent / b.monthlyAmount) * 100)) : 0
       };
     });
+  }
+
+  /* ---------------- Budget Envelopes (budget-as-account) ----------------
+   * A budget here is a self-contained pot of money (e.g. "Travel",
+   * "Personal Savings") with its own initial amount, its own running
+   * balance, and its own transaction history. This is layered on top of
+   * the SAME transaction list used everywhere else in the app — every
+   * "add expense" / "add money" inside an envelope creates a normal
+   * transaction record with envelopeId + envelopeKind set, so nothing
+   * bypasses the existing calculation/export/Drive-sync pipeline, and
+   * nothing is ever a manually-edited standalone balance.
+   */
+  addEnvelope({ name, initialAmount = 0, category = 'General', description = '', startDate, endDate, color, notes }) {
+    if (!name || !String(name).trim()) throw new Error('Budget name is required');
+    const env = {
+      id: uid(), name: String(name).trim(), initialAmount: Math.abs(Number(initialAmount)) || 0,
+      category, description: description || '', startDate: startDate || todayISO(), endDate: endDate || null,
+      color: color || null, notes: notes || '', createdAt: nowISO(), updatedAt: nowISO()
+    };
+    this.state.envelopes.push(env);
+    this.save();
+    return env;
+  }
+  updateEnvelope(id, patch) {
+    const env = this.state.envelopes.find(e => e.id === id);
+    if (!env) return null;
+    if (patch.initialAmount != null) patch.initialAmount = Math.abs(Number(patch.initialAmount)) || 0;
+    Object.assign(env, patch, { updatedAt: nowISO() });
+    this.save();
+    return env;
+  }
+  // Deletes the envelope AND every transaction tied to it (explicit, irreversible — UI must confirm first)
+  deleteEnvelope(id) {
+    const removedTx = this.state.transactions.filter(t => t.envelopeId === id);
+    this.state.transactions = this.state.transactions.filter(t => t.envelopeId !== id);
+    this.state.envelopes = this.state.envelopes.filter(e => e.id !== id);
+    this.save();
+    return removedTx;
+  }
+  envelopeTransactions(id) {
+    return this.state.transactions
+      .filter(t => t.envelopeId === id)
+      .sort((a, b) => (a.date + (a.time || '') + a.createdAt).localeCompare(b.date + (b.time || '') + b.createdAt));
+  }
+  // Adds a real transaction scoped to this envelope. kind: 'expense' | 'addition'
+  addEnvelopeTransaction(envelopeId, kind, payload) {
+    const env = this.state.envelopes.find(e => e.id === envelopeId);
+    if (!env) throw new Error('Budget not found');
+    const amount = Math.abs(Number(payload.amount));
+    if (!amount || isNaN(amount)) throw new Error('Enter a valid amount');
+    return this.addTransaction({
+      type: kind === 'addition' ? 'income' : 'expense',
+      amount,
+      date: payload.date || todayISO(),
+      time: payload.time || new Date().toTimeString().slice(0, 5),
+      category: kind === 'addition' ? 'Money Added' : (payload.category || 'Other'),
+      merchant: payload.title || (kind === 'addition' ? 'Money Added' : 'Expense'),
+      note: payload.description || '',
+      paymentMethod: payload.paymentMethod || '',
+      notes: payload.notes || '',
+      receipt: payload.receipt || null,
+      accountId: payload.accountId || undefined,
+      needWant: payload.needWant || null,
+      envelopeId, envelopeKind: kind
+    });
+  }
+  // Stats for a single envelope — always derived, never a stored/editable balance
+  envelopeStats(id) {
+    const env = this.state.envelopes.find(e => e.id === id);
+    if (!env) return null;
+    const txs = this.envelopeTransactions(id);
+    const totalAdded = txs.filter(t => t.envelopeKind === 'addition').reduce((s, t) => s + t.amount, 0);
+    const totalSpent = txs.filter(t => t.envelopeKind === 'expense').reduce((s, t) => s + t.amount, 0);
+    const totalAvailable = env.initialAmount + totalAdded;
+    const balance = totalAvailable - totalSpent;
+    const pct = totalAvailable > 0 ? Math.round((totalSpent / totalAvailable) * 1000) / 10 : 0;
+    let status = 'Active';
+    if (balance < 0) status = 'Over Budget';
+    else if (env.endDate && env.endDate < todayISO()) status = 'Completed';
+    return {
+      envelope: env, totalAdded, totalSpent, totalAvailable, balance, pct,
+      txCount: txs.length, status
+    };
+  }
+  // Running balance alongside each transaction, in chronological order
+  envelopeTransactionsWithRunningBalance(id) {
+    const env = this.state.envelopes.find(e => e.id === id);
+    if (!env) return [];
+    let running = env.initialAmount;
+    return this.envelopeTransactions(id).map(t => {
+      running += t.envelopeKind === 'addition' ? t.amount : -t.amount;
+      return { ...t, runningBalance: running };
+    });
+  }
+  allEnvelopeStats() { return this.state.envelopes.map(e => this.envelopeStats(e.id)); }
+  envelopeDashboardTotals() {
+    const all = this.allEnvelopeStats();
+    return {
+      totalFunds: all.reduce((s, e) => s + e.envelope.initialAmount, 0),
+      totalAdded: all.reduce((s, e) => s + e.totalAdded, 0),
+      totalSpent: all.reduce((s, e) => s + e.totalSpent, 0),
+      totalRemaining: all.reduce((s, e) => s + e.balance, 0),
+      count: all.length,
+      txCount: all.reduce((s, e) => s + e.txCount, 0)
+    };
+  }
+  filterEnvelopeTransactions(envelopeId, filters = {}) {
+    let list = this.envelopeTransactionsWithRunningBalance(envelopeId);
+    if (filters.query) {
+      const q = filters.query.trim().toLowerCase();
+      list = list.filter(t => [t.merchant, t.note, t.category, t.notes].filter(Boolean).join(' ').toLowerCase().includes(q));
+    }
+    if (filters.kind) list = list.filter(t => t.envelopeKind === filters.kind);
+    if (filters.category) list = list.filter(t => t.category === filters.category);
+    if (filters.paymentMethod) list = list.filter(t => t.paymentMethod === filters.paymentMethod);
+    if (filters.dateFrom) list = list.filter(t => t.date >= filters.dateFrom);
+    if (filters.dateTo) list = list.filter(t => t.date <= filters.dateTo);
+    if (filters.minAmount != null) list = list.filter(t => t.amount >= filters.minAmount);
+    if (filters.maxAmount != null) list = list.filter(t => t.amount <= filters.maxAmount);
+    return list.slice().reverse(); // newest first for display
+  }
+  searchEnvelopes(query) {
+    const q = (query || '').trim().toLowerCase();
+    let list = this.allEnvelopeStats();
+    if (q) list = list.filter(e => [e.envelope.name, e.envelope.category, e.envelope.description].filter(Boolean).join(' ').toLowerCase().includes(q));
+    return list;
+  }
+  sortEnvelopeStats(list, sortBy) {
+    const arr = list.slice();
+    if (sortBy === 'highest_spend') arr.sort((a, b) => b.totalSpent - a.totalSpent);
+    else if (sortBy === 'lowest_spend') arr.sort((a, b) => a.totalSpent - b.totalSpent);
+    else if (sortBy === 'name') arr.sort((a, b) => a.envelope.name.localeCompare(b.envelope.name));
+    else if (sortBy === 'recent') arr.sort((a, b) => b.envelope.createdAt.localeCompare(a.envelope.createdAt));
+    else if (sortBy === 'active') arr.sort((a, b) => (a.status === 'Active' ? -1 : 1) - (b.status === 'Active' ? -1 : 1));
+    return arr;
+  }
+  // One-time, non-destructive migration: only ever ADDS a fallback envelope,
+  // never touches or deletes any existing data. Called lazily by the UI.
+  ensureUncategorizedEnvelope() {
+    let env = this.state.envelopes.find(e => e.name === 'General / Uncategorized');
+    if (!env) env = this.addEnvelope({ name: 'General / Uncategorized', initialAmount: 0, category: 'Other', description: 'Auto-created holder for expenses not assigned to a specific budget.' });
+    return env;
   }
 
   /* ---------------- Goals ---------------- */
@@ -480,11 +626,12 @@ class Store {
     return JSON.stringify(this.state, null, 2);
   }
   exportCSV(transactions = this.state.transactions) {
-    const headers = ['date', 'time', 'type', 'amount', 'category', 'subcategory', 'account', 'person', 'merchant', 'note', 'needWant'];
+    const headers = ['date', 'time', 'type', 'amount', 'category', 'subcategory', 'account', 'person', 'budget', 'merchant', 'note', 'needWant'];
     const rows = transactions.map(t => {
       const acc = this.state.accounts.find(a => a.id === t.accountId);
       const person = this.state.people.find(p => p.id === t.personId);
-      return [t.date, t.time, t.type, t.amount, t.category || '', t.subcategory || '', acc ? acc.name : '', person ? person.name : '', t.merchant || '', (t.note || '').replace(/,/g, ';'), t.needWant || ''];
+      const env = this.state.envelopes.find(e => e.id === t.envelopeId);
+      return [t.date, t.time, t.type, t.amount, t.category || '', t.subcategory || '', acc ? acc.name : '', person ? person.name : '', env ? env.name : '', t.merchant || '', (t.note || '').replace(/,/g, ';'), t.needWant || ''];
     });
     return [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
   }

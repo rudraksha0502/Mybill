@@ -165,8 +165,23 @@
 
   /* ---------------- Router ---------------- */
   function router() {
-    const hash = (location.hash || '#dashboard').replace('#', '');
-    const route = ROUTES.includes(hash) ? hash : 'dashboard';
+    const raw = (location.hash || '#dashboard').replace('#', '');
+
+    // Sub-route: #budget/<envelopeId> — full Budget Details screen
+    if (raw.startsWith('budget/')) {
+      const envId = raw.slice('budget/'.length);
+      const env = S.state.envelopes.find(e => e.id === envId);
+      document.querySelectorAll('[data-route]').forEach(a => a.classList.toggle('active', a.dataset.route === 'budgets'));
+      const page = document.getElementById('page');
+      if (!page) return;
+      Object.values(charts).forEach(c => c && c.destroy && c.destroy());
+      charts = {};
+      if (!env) { location.hash = '#budgets'; return; }
+      renderBudgetDetails(page, env.id);
+      return;
+    }
+
+    const route = ROUTES.includes(raw) ? raw : 'dashboard';
     document.querySelectorAll('[data-route]').forEach(a => a.classList.toggle('active', a.dataset.route === route));
     const page = document.getElementById('page');
     if (!page) return;
@@ -264,6 +279,13 @@
         ${overdue.length ? `<p class="alert-line">⚠ ${overdue.length} overdue payment${overdue.length > 1 ? 's' : ''}</p>` : ''}
         ${upcoming.length ? `<ul class="simple-list">${upcoming.slice(0, 6).map(r => `<li><span>${escapeHtml(r.name)}</span><span class="muted">${r.nextDate}</span><span>${fmt(r.amount)}</span></li>`).join('')}</ul>` : emptyState('Nothing due soon.', null)}
       </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h3>Budgets</h3><a href="#budgets">Manage</a></div>
+      ${S.state.envelopes.length
+        ? `<ul class="simple-list">${S.allEnvelopeStats().slice(0, 6).map(st => `<li><span>${escapeHtml(st.envelope.name)}</span><span class="${st.balance < 0 ? 'neg' : ''}">${fmt(st.balance)} remaining</span></li>`).join('')}</ul>`
+        : emptyState('No budgets created yet.', '+ Create Your First Budget', () => { location.hash = '#budgets'; })}
     </section>`;
 
     document.getElementById('dash-add').addEventListener('click', openQuickAddSheet);
@@ -301,12 +323,13 @@
   function txRow(t) {
     const acc = S.state.accounts.find(a => a.id === t.accountId);
     const person = S.state.people.find(p => p.id === t.personId);
+    const env = t.envelopeId ? S.state.envelopes.find(e => e.id === t.envelopeId) : null;
     const sign = ['income', 'refund', 'repay_received', 'borrow'].includes(t.type) ? '+' : (t.type === 'transfer' ? '↔' : '−');
     const cls = sign === '+' ? 'pos' : (sign === '↔' ? '' : 'neg');
     return `<li class="tx-row" data-id="${t.id}">
       <div class="tx-main">
         <span class="tx-cat">${escapeHtml(t.merchant || t.category || t.type)}</span>
-        <span class="muted small">${t.date} · ${acc ? escapeHtml(acc.name) : ''}${person ? ' · ' + escapeHtml(person.name) : ''}</span>
+        <span class="muted small">${t.date} · ${acc ? escapeHtml(acc.name) : ''}${person ? ' · ' + escapeHtml(person.name) : ''}${env ? ` · <a href="#budget/${env.id}">${escapeHtml(env.name)}</a>` : ''}</span>
       </div>
       <span class="tx-amount ${cls}">${sign}${fmt(t.amount)}</span>
       <button class="icon-btn tx-edit" title="Edit">✎</button>
@@ -413,21 +436,338 @@
     `);
   }
 
-  /* ================= BUDGETS ================= */
+  /* ================= BUDGETS (envelope-style budget accounts) ================= */
+  function budgetStatusTag(status) {
+    return status === 'Over Budget' ? 'tag-danger' : status === 'Completed' ? '' : '';
+  }
+  function envelopeCard(stat) {
+    const e = stat.envelope;
+    const pctClamped = Math.min(100, Math.max(0, stat.pct));
+    const barClass = stat.status === 'Over Budget' ? 'danger' : stat.pct >= 75 ? 'warn' : '';
+    return `<div class="card env-card" data-id="${e.id}" tabindex="0" role="button">
+      <div class="card-head">
+        <h3>${escapeHtml(e.name)}</h3>
+        <span class="tag ${budgetStatusTag(stat.status)}">${stat.status === 'Over Budget' ? '⚠️ Over Budget' : stat.status}</span>
+      </div>
+      <div class="big-number ${stat.balance < 0 ? 'neg' : ''}">${fmt(stat.balance)}<span class="muted small"> remaining</span></div>
+      <div class="progress-bar"><div class="progress-fill ${barClass}" style="width:${pctClamped}%"></div></div>
+      <div class="muted small">${fmt(stat.totalSpent)} spent of ${fmt(stat.totalAvailable)} · ${stat.pct}% used</div>
+      <div class="muted small">${stat.txCount} transaction${stat.txCount === 1 ? '' : 's'} · created ${e.createdAt.slice(0, 10)}</div>
+    </div>`;
+  }
   function renderBudgets(page) {
-    const status = S.budgetStatus();
     page.innerHTML = `
-    <div class="page-head"><h1>Budgets</h1><button class="btn-primary" id="budget-add">+ Set budget</button></div>
-    <div class="cards-grid" id="budget-list"></div>`;
-    document.getElementById('budget-add').addEventListener('click', openBudgetModal);
-    const list = document.getElementById('budget-list');
-    if (!status.length) { list.innerHTML = emptyState('No budgets set yet.', '+ Set budget', openBudgetModal); return; }
-    list.innerHTML = status.map(b => `
-      <div class="card">
-        <div class="card-head"><h3>${escapeHtml(b.category)}</h3><span class="tag ${b.pct >= 100 ? 'tag-danger' : b.pct >= 75 ? 'tag-warn' : ''}">${b.pct}%</span></div>
-        <div class="progress-bar"><div class="progress-fill ${b.pct >= 100 ? 'danger' : b.pct >= 75 ? 'warn' : ''}" style="width:${Math.min(100, b.pct)}%"></div></div>
-        <div class="muted small">${fmt(b.spent)} spent of ${fmt(b.monthlyAmount)} · ${fmt(Math.max(0, b.remaining))} remaining</div>
-      </div>`).join('');
+    <div class="page-head"><h1>Budgets</h1><button class="btn-primary" id="env-add">+ Create budget</button></div>
+    <section class="kpi-grid" id="env-dash-kpis"></section>
+    <div class="filter-bar">
+      <input type="text" id="env-search" placeholder="Search budgets…">
+      <select id="env-sort">
+        <option value="">Sort: default</option>
+        <option value="active">Active first</option>
+        <option value="highest_spend">Highest spending</option>
+        <option value="lowest_spend">Lowest spending</option>
+        <option value="recent">Recently created</option>
+        <option value="name">Name</option>
+      </select>
+    </div>
+    <div class="cards-grid" id="env-list"></div>
+    ${S.state.envelopes.length ? `<div class="card"><h3>Spending by budget</h3><canvas id="chart-env-spend"></canvas></div>` : ''}
+    <div class="card">
+      <div class="card-head"><h3>Category spending limits</h3><button class="btn-ghost small" id="catbudget-add">+ Set limit</button></div>
+      <p class="muted small">Separate from budgets above — this is a simple monthly cap per spending category (e.g. "Food ≤ ₹3,500/month").</p>
+      <div id="catbudget-list"></div>
+    </div>`;
+
+    const totals = S.envelopeDashboardTotals();
+    document.getElementById('env-dash-kpis').innerHTML = `
+      <div class="kpi kpi-primary"><span class="kpi-label">Total funds</span><span class="kpi-value">${fmt(totals.totalFunds)}</span></div>
+      <div class="kpi"><span class="kpi-label">Total added</span><span class="kpi-value">${fmt(totals.totalAdded)}</span></div>
+      <div class="kpi"><span class="kpi-label">Total spent</span><span class="kpi-value neg">${fmt(totals.totalSpent)}</span></div>
+      <div class="kpi"><span class="kpi-label">Total remaining</span><span class="kpi-value pos">${fmt(totals.totalRemaining)}</span></div>
+      <div class="kpi"><span class="kpi-label">Budgets</span><span class="kpi-value">${totals.count}</span></div>`;
+
+    document.getElementById('env-add').addEventListener('click', () => openEnvelopeModal());
+    document.getElementById('catbudget-add').addEventListener('click', openCategoryBudgetModal);
+
+    const rerenderList = () => {
+      const q = document.getElementById('env-search').value;
+      const sortBy = document.getElementById('env-sort').value;
+      let stats = S.searchEnvelopes(q);
+      stats = S.sortEnvelopeStats(stats, sortBy);
+      const list = document.getElementById('env-list');
+      list.innerHTML = stats.length ? stats.map(envelopeCard).join('') : emptyState('No budgets created yet.', '+ Create Your First Budget', () => openEnvelopeModal());
+      list.querySelectorAll('.env-card').forEach(card => {
+        card.addEventListener('click', () => { location.hash = `#budget/${card.dataset.id}`; });
+        card.addEventListener('keypress', (e) => { if (e.key === 'Enter') location.hash = `#budget/${card.dataset.id}`; });
+      });
+    };
+    document.getElementById('env-search').addEventListener('input', rerenderList);
+    document.getElementById('env-sort').addEventListener('change', rerenderList);
+    rerenderList();
+
+    const chartCanvas = document.getElementById('chart-env-spend');
+    if (chartCanvas) {
+      const all = S.allEnvelopeStats();
+      charts.envSpend = new Chart(chartCanvas, {
+        type: 'bar',
+        data: { labels: all.map(s => s.envelope.name), datasets: [{ label: 'Spent', data: all.map(s => s.totalSpent), backgroundColor: palette(all.length) }] },
+        options: chartOpts()
+      });
+    }
+
+    // legacy category-cap budgets, unchanged behaviour
+    const status = S.budgetStatus();
+    const catList = document.getElementById('catbudget-list');
+    catList.innerHTML = status.length ? status.map(b => `
+      <div class="cat-budget-row">
+        <span>${escapeHtml(b.category)}</span>
+        <div class="progress-bar" style="flex:1;margin:0 12px"><div class="progress-fill ${b.pct >= 100 ? 'danger' : b.pct >= 75 ? 'warn' : ''}" style="width:${Math.min(100, b.pct)}%"></div></div>
+        <span class="muted small">${fmt(b.spent)} / ${fmt(b.monthlyAmount)}</span>
+      </div>`).join('') : `<p class="muted small">No category limits set.</p>`;
+  }
+
+  /* ---- Budget Details (full screen) ---- */
+  let envDetailFilters = {};
+  function renderBudgetDetails(page, envelopeId) {
+    const stat = S.envelopeStats(envelopeId);
+    if (!stat) { location.hash = '#budgets'; return; }
+    const e = stat.envelope;
+    envDetailFilters = envDetailFilters.envelopeId === envelopeId ? envDetailFilters : { envelopeId };
+    const pctClamped = Math.min(100, Math.max(0, stat.pct));
+    const barClass = stat.status === 'Over Budget' ? 'danger' : stat.pct >= 75 ? 'warn' : '';
+
+    page.innerHTML = `
+    <div class="page-head">
+      <div class="detail-title-row"><button class="icon-btn" id="env-back">←</button><h1>${escapeHtml(e.name)}</h1></div>
+      <div class="card-actions">
+        <button class="btn-ghost small" id="env-edit">Edit</button>
+        <button class="btn-ghost small danger" id="env-delete">Delete</button>
+      </div>
+    </div>
+
+    <section class="card">
+      <div class="card-head"><h3>Budget overview</h3><span class="tag ${budgetStatusTag(stat.status)}">${stat.status === 'Over Budget' ? '⚠️ Over Budget' : stat.status}</span></div>
+      <div class="row-stats">
+        <div><span class="muted">Initial budget</span><div class="stat">${fmt(e.initialAmount)}</div></div>
+        <div><span class="muted">Total added</span><div class="stat pos">${fmt(stat.totalAdded)}</div></div>
+        <div><span class="muted">Total spent</span><div class="stat neg">${fmt(stat.totalSpent)}</div></div>
+        <div><span class="muted">Available balance</span><div class="stat ${stat.balance < 0 ? 'neg' : ''}">${fmt(stat.balance)}</div></div>
+      </div>
+      <div class="progress-bar"><div class="progress-fill ${barClass}" style="width:${pctClamped}%"></div></div>
+      <div class="muted small">${stat.pct}% used · ${stat.txCount} transaction${stat.txCount === 1 ? '' : 's'}${e.endDate ? ' · ends ' + e.endDate : ''}</div>
+      ${e.description ? `<p class="muted small">${escapeHtml(e.description)}</p>` : ''}
+      ${e.notes ? `<p class="muted small">Notes: ${escapeHtml(e.notes)}</p>` : ''}
+      <div class="card-actions">
+        <button class="btn-primary" id="env-add-expense">+ Add expense</button>
+        <button class="btn-ghost" id="env-add-money">+ Add money</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h3>Transaction history</h3></div>
+      <div class="filter-bar">
+        <input type="text" id="env-tx-search" placeholder="Search transactions…">
+        <select id="env-tx-kind"><option value="">All</option><option value="expense">Expenses</option><option value="addition">Money added</option></select>
+        <select id="env-tx-range"><option value="">All time</option><option value="today">Today</option><option value="yesterday">Yesterday</option><option value="week">This week</option><option value="month">This month</option><option value="last_month">Last month</option></select>
+      </div>
+      <ul class="tx-list" id="env-tx-list"></ul>
+    </section>`;
+
+    document.getElementById('env-back').addEventListener('click', () => { location.hash = '#budgets'; });
+    document.getElementById('env-edit').addEventListener('click', () => openEnvelopeModal(e));
+    document.getElementById('env-delete').addEventListener('click', () => confirmDeleteEnvelope(e));
+    document.getElementById('env-add-expense').addEventListener('click', () => openEnvelopeTxModal(e.id, 'expense'));
+    document.getElementById('env-add-money').addEventListener('click', () => openEnvelopeTxModal(e.id, 'addition'));
+
+    const rerenderTx = () => {
+      const kind = document.getElementById('env-tx-kind').value;
+      const range = document.getElementById('env-tx-range').value;
+      const query = document.getElementById('env-tx-search').value;
+      const { dateFrom, dateTo } = dateRangeFor(range);
+      const list = S.filterEnvelopeTransactions(envelopeId, { kind, dateFrom, dateTo, query });
+      const ul = document.getElementById('env-tx-list');
+      ul.innerHTML = list.length ? list.map(envTxRow).join('') : emptyState('No transactions yet.', '+ Add Expense', () => openEnvelopeTxModal(envelopeId, 'expense'));
+      ul.querySelectorAll('.env-tx-row').forEach(row => row.addEventListener('click', (ev) => {
+        if (ev.target.closest('.tx-delete') || ev.target.closest('.tx-edit')) return;
+        openEnvelopeTxDetailsModal(list.find(t => t.id === row.dataset.id));
+      }));
+      ul.querySelectorAll('.tx-edit').forEach(b => b.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const t = list.find(t => t.id === b.closest('.env-tx-row').dataset.id);
+        openEnvelopeTxModal(envelopeId, t.envelopeKind, t);
+      }));
+      ul.querySelectorAll('.tx-delete').forEach(b => b.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const id = b.closest('.env-tx-row').dataset.id;
+        confirmDeleteEnvelopeTx(id);
+      }));
+    };
+    ['env-tx-kind', 'env-tx-range', 'env-tx-search'].forEach(id => document.getElementById(id).addEventListener('input', rerenderTx));
+    rerenderTx();
+  }
+
+  function envTxRow(t) {
+    const isAdd = t.envelopeKind === 'addition';
+    return `<li class="tx-row env-tx-row" data-id="${t.id}" style="cursor:pointer">
+      <div class="tx-main">
+        <span class="tx-cat">${isAdd ? '🟢' : '🔴'} ${escapeHtml(t.merchant || t.category)}</span>
+        <span class="muted small">${t.date}${t.time ? ' · ' + t.time : ''} · balance after: ${fmt(t.runningBalance)}</span>
+      </div>
+      <span class="tx-amount ${isAdd ? 'pos' : 'neg'}">${isAdd ? '+' : '−'}${fmt(t.amount)}</span>
+      <button class="icon-btn tx-edit" title="Edit">✎</button>
+      <button class="icon-btn tx-delete" title="Delete">🗑</button>
+    </li>`;
+  }
+
+  function dateRangeFor(preset) {
+    const today = new Date();
+    const iso = (d) => d.toISOString().slice(0, 10);
+    if (preset === 'today') return { dateFrom: iso(today), dateTo: iso(today) };
+    if (preset === 'yesterday') { const y = new Date(today); y.setDate(y.getDate() - 1); return { dateFrom: iso(y), dateTo: iso(y) }; }
+    if (preset === 'week') { const w = new Date(today); w.setDate(w.getDate() - 7); return { dateFrom: iso(w), dateTo: iso(today) }; }
+    if (preset === 'month') { const m = new Date(today.getFullYear(), today.getMonth(), 1); return { dateFrom: iso(m), dateTo: iso(today) }; }
+    if (preset === 'last_month') { const s = new Date(today.getFullYear(), today.getMonth() - 1, 1); const en = new Date(today.getFullYear(), today.getMonth(), 0); return { dateFrom: iso(s), dateTo: iso(en) }; }
+    return {};
+  }
+
+  /* ---- Transaction details modal (within a budget) ---- */
+  function openEnvelopeTxDetailsModal(t) {
+    if (!t) return;
+    const isAdd = t.envelopeKind === 'addition';
+    modal(isAdd ? 'Money added — details' : 'Expense — details', `
+      <ul class="simple-list">
+        <li><span>Type</span><span>${isAdd ? 'Money Added' : 'Expense'}</span></li>
+        <li><span>Amount</span><span>${fmt(t.amount)}</span></li>
+        <li><span>Title</span><span>${escapeHtml(t.merchant || '')}</span></li>
+        <li><span>Category</span><span>${escapeHtml(t.category || '')}</span></li>
+        <li><span>Date</span><span>${t.date}</span></li>
+        <li><span>Time</span><span>${t.time || '—'}</span></li>
+        <li><span>Payment method</span><span>${escapeHtml(t.paymentMethod || '—')}</span></li>
+        <li><span>Description</span><span>${escapeHtml(t.note || '—')}</span></li>
+        <li><span>Notes</span><span>${escapeHtml(t.notes || '—')}</span></li>
+        <li><span>Balance after</span><span>${fmt(t.runningBalance)}</span></li>
+      </ul>
+      ${t.receipt && t.receipt.dataUrl ? `<img src="${t.receipt.dataUrl}" alt="receipt" style="max-width:100%;border-radius:10px;margin-top:10px">` : ''}
+    `, `<button class="btn-ghost" id="etx-close">Close</button><button class="btn-ghost" id="etx-edit-btn">Edit</button><button class="btn-ghost danger" id="etx-delete-btn">Delete</button>`);
+    document.getElementById('etx-close').addEventListener('click', closeModal);
+    document.getElementById('etx-edit-btn').addEventListener('click', () => { closeModal(); openEnvelopeTxModal(t.envelopeId, t.envelopeKind, t); });
+    document.getElementById('etx-delete-btn').addEventListener('click', () => { closeModal(); confirmDeleteEnvelopeTx(t.id); });
+  }
+
+  function confirmDeleteEnvelopeTx(id) {
+    const t = S.state.transactions.find(t => t.id === id);
+    if (!t) return;
+    modal('Delete this transaction?', `<p>Delete this ${t.envelopeKind === 'addition' ? 'addition' : 'expense'} of ${fmt(t.amount)}${t.merchant ? ' — ' + escapeHtml(t.merchant) : ''}? This will recalculate the budget balance.</p>`,
+      `<button class="btn-ghost" id="del-cancel">Cancel</button><button class="btn-ghost danger" id="del-confirm">Delete</button>`);
+    document.getElementById('del-cancel').addEventListener('click', closeModal);
+    document.getElementById('del-confirm').addEventListener('click', () => {
+      const removed = S.deleteTransaction(id);
+      closeModal();
+      toast('Transaction deleted', 'UNDO', () => S.restoreTransaction(removed));
+    });
+  }
+
+  function confirmDeleteEnvelope(env) {
+    modal(`Delete "${escapeHtml(env.name)}"?`, `<p>All transactions associated with this budget will also be deleted. This cannot be undone.</p>`,
+      `<button class="btn-ghost" id="del-env-cancel">Cancel</button><button class="btn-ghost danger" id="del-env-confirm">Delete budget</button>`);
+    document.getElementById('del-env-cancel').addEventListener('click', closeModal);
+    document.getElementById('del-env-confirm').addEventListener('click', () => {
+      S.deleteEnvelope(env.id);
+      closeModal();
+      toast('Budget deleted');
+      location.hash = '#budgets';
+    });
+  }
+
+  function openEnvelopeModal(existing) {
+    modal(existing ? 'Edit budget' : 'Create budget', `
+      <form id="env-form" class="stacked-form">
+        <label>Budget name<input name="name" required value="${escapeHtml(existing ? existing.name : '')}" placeholder="e.g. Travel"></label>
+        <label>Initial amount<input name="initialAmount" type="number" min="0" step="0.01" required value="${existing ? existing.initialAmount : ''}"></label>
+        <label>Category<select name="category">${categoryOptions(existing ? existing.category : undefined)}</select></label>
+        <label>Description (optional)<input name="description" value="${escapeHtml(existing ? existing.description : '')}"></label>
+        <label>Start date<input name="startDate" type="date" value="${existing ? existing.startDate : H.todayISO()}"></label>
+        <label>End date (optional)<input name="endDate" type="date" value="${existing && existing.endDate ? existing.endDate : ''}"></label>
+        <label>Notes (optional)<input name="notes" value="${escapeHtml(existing ? existing.notes : '')}"></label>
+      </form>`,
+      `<button class="btn-ghost" id="env-cancel">Cancel</button><button class="btn-primary" id="env-save">Save</button>`
+    );
+    document.getElementById('env-cancel').addEventListener('click', closeModal);
+    let saving = false;
+    document.getElementById('env-save').addEventListener('click', () => {
+      if (saving) return;
+      const f = new FormData(document.getElementById('env-form'));
+      const name = (f.get('name') || '').trim();
+      const amount = Number(f.get('initialAmount'));
+      if (!name) { toast('Budget name is required'); return; }
+      if (isNaN(amount) || amount < 0) { toast('Enter a valid initial amount'); return; }
+      saving = true;
+      const payload = {
+        name, initialAmount: amount, category: f.get('category'), description: f.get('description'),
+        startDate: f.get('startDate'), endDate: f.get('endDate') || null, notes: f.get('notes')
+      };
+      try {
+        if (existing) S.updateEnvelope(existing.id, payload); else S.addEnvelope(payload);
+        closeModal(); toast(existing ? 'Budget updated' : 'Budget created');
+      } catch (err) { toast(err.message); saving = false; }
+    });
+  }
+
+  function openEnvelopeTxModal(envelopeId, kind, existing) {
+    const isAdd = kind === 'addition';
+    modal(existing ? `Edit ${isAdd ? 'addition' : 'expense'}` : (isAdd ? 'Add money' : 'Add expense'), `
+      <form id="etx-form" class="stacked-form">
+        <label>Amount<input name="amount" type="number" min="0.01" step="0.01" required value="${existing ? existing.amount : ''}"></label>
+        <label>Title<input name="title" required value="${escapeHtml(existing ? existing.merchant : '')}" placeholder="${isAdd ? 'e.g. Additional travel money' : 'e.g. Tea'}"></label>
+        ${isAdd ? '' : `<label>Category<select name="category">${categoryOptions(existing ? existing.category : undefined)}</select></label>`}
+        <label>Date<input name="date" type="date" value="${existing ? existing.date : H.todayISO()}"></label>
+        <label>Time<input name="time" type="time" value="${existing ? existing.time : new Date().toTimeString().slice(0, 5)}"></label>
+        ${isAdd ? '' : `<label>Payment method<select name="paymentMethod"><option>Cash</option><option>UPI</option><option>Card</option><option>Bank transfer</option><option>Other</option></select></label>`}
+        <label>Description<input name="description" value="${escapeHtml(existing ? existing.note : '')}"></label>
+        <label>Notes<input name="notes" value="${escapeHtml(existing ? existing.notes : '')}"></label>
+        ${isAdd ? '' : `<label>Receipt (optional)<input name="receipt" type="file" accept="image/*"></label>`}
+      </form>`,
+      `<button class="btn-ghost" id="etx-cancel">Cancel</button><button class="btn-primary" id="etx-save">${existing ? 'Save changes' : 'Save'}</button>`
+    );
+    document.getElementById('etx-cancel').addEventListener('click', closeModal);
+    let saving = false;
+    document.getElementById('etx-save').addEventListener('click', async () => {
+      if (saving) return;
+      const form = document.getElementById('etx-form');
+      const f = new FormData(form);
+      const amount = Number(f.get('amount'));
+      const title = (f.get('title') || '').trim();
+      if (!title) { toast('Title is required'); return; }
+      if (isNaN(amount) || amount <= 0) { toast('Enter a valid amount greater than zero'); return; }
+      saving = true;
+      const payload = {
+        amount, title, category: f.get('category'), date: f.get('date'), time: f.get('time'),
+        paymentMethod: f.get('paymentMethod'), description: f.get('description'), notes: f.get('notes')
+      };
+      const fileInput = form.querySelector('input[name="receipt"]');
+      const finish = () => {
+        try {
+          if (existing) {
+            S.updateTransaction(existing.id, {
+              amount: payload.amount, merchant: payload.title, category: payload.category || existing.category,
+              date: payload.date, time: payload.time, paymentMethod: payload.paymentMethod,
+              note: payload.description, notes: payload.notes, receipt: payload.receipt || existing.receipt
+            });
+          } else {
+            S.addEnvelopeTransaction(envelopeId, kind, payload);
+          }
+          closeModal(); toast(existing ? 'Transaction updated' : (isAdd ? 'Money added' : 'Expense added'));
+        } catch (err) { toast(err.message); saving = false; }
+      };
+      if (fileInput && fileInput.files && fileInput.files[0]) {
+        const reader = new FileReader();
+        reader.onload = () => { payload.receipt = { name: fileInput.files[0].name, dataUrl: reader.result }; finish(); };
+        reader.onerror = finish;
+        reader.readAsDataURL(fileInput.files[0]);
+      } else {
+        finish();
+      }
+    });
   }
 
   /* ================= GOALS ================= */
@@ -722,18 +1062,18 @@
     });
   }
 
-  function openBudgetModal() {
-    modal('Set budget', `
-      <form id="budget-form" class="stacked-form">
+  function openCategoryBudgetModal() {
+    modal('Set category spending limit', `
+      <form id="catbudget-form" class="stacked-form">
         <label>Category<select name="category">${categoryOptions()}</select></label>
         <label>Monthly amount<input name="amount" type="number" min="0" required></label>
       </form>`,
-      `<button class="btn-ghost" id="budget-cancel">Cancel</button><button class="btn-primary" id="budget-save">Save</button>`);
-    document.getElementById('budget-cancel').addEventListener('click', closeModal);
-    document.getElementById('budget-save').addEventListener('click', () => {
-      const f = new FormData(document.getElementById('budget-form'));
+      `<button class="btn-ghost" id="catbudget-cancel">Cancel</button><button class="btn-primary" id="catbudget-save">Save</button>`);
+    document.getElementById('catbudget-cancel').addEventListener('click', closeModal);
+    document.getElementById('catbudget-save').addEventListener('click', () => {
+      const f = new FormData(document.getElementById('catbudget-form'));
       S.setBudget(f.get('category'), Number(f.get('amount')) || 0);
-      closeModal(); toast('Budget saved');
+      closeModal(); toast('Category limit saved'); router();
     });
   }
 
