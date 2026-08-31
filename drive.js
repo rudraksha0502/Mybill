@@ -50,7 +50,7 @@ const MyBillDrive = (() => {
       const s = document.createElement('script');
       s.src = 'https://accounts.google.com/gsi/client';
       s.onload = resolve;
-      s.onerror = reject;
+      s.onerror = () => reject(new Error('Could not load Google\'s sign-in script — check your internet connection.'));
       document.head.appendChild(s);
     });
   }
@@ -65,7 +65,9 @@ const MyBillDrive = (() => {
         client_id: window.MYBILL_CONFIG.GOOGLE_CLIENT_ID,
         scope: DRIVE_SCOPE,
         callback: async (resp) => {
-          if (resp.error) return reject(resp);
+          if (resp.error) {
+            return reject(new Error(resp.error_description || resp.error || 'Google sign-in was denied.'));
+          }
           accessToken = resp.access_token;
           connected = true;
           setStatus('syncing');
@@ -75,8 +77,15 @@ const MyBillDrive = (() => {
             resolve();
           } catch (e) {
             setStatus('sync failed');
-            reject(e);
+            reject(e instanceof Error ? e : new Error(String(e && e.message ? e.message : e)));
           }
+        },
+        error_callback: (err) => {
+          const type = err && err.type;
+          const friendly = type === 'popup_closed' ? 'Sign-in window was closed before finishing.'
+            : type === 'popup_failed_to_open' ? 'Google sign-in popup was blocked by the browser — allow popups for this site and try again.'
+            : (err && err.message) || 'Google sign-in failed.';
+          reject(new Error(friendly));
         }
       });
       tokenClient.requestAccessToken();
@@ -173,7 +182,12 @@ const MyBillDrive = (() => {
 
   async function restoreFromDrive() {
     const json = await pullFromDrive();
-    if (json) window.MyBillStore.importJSON(json);
+    if (!json) return false;
+    let parsed;
+    try { parsed = JSON.parse(json); } catch (e) { return false; }
+    if (!parsed || !parsed.profile || !parsed.profile.onboarded) return false; // nothing real saved yet
+    window.MyBillStore.importJSON(json);
+    return true;
   }
 
   return { connect, disconnect, isConfigured, isConnected, queueSync, restoreFromDrive, onStatus };

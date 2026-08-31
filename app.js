@@ -43,11 +43,19 @@
 
   /* ---------------- Onboarding ---------------- */
   function renderOnboarding() {
+    const driveConfigured = window.MyBillDrive && window.MyBillDrive.isConfigured();
     root.innerHTML = `
     <div class="onboard-screen">
       <div class="onboard-card">
         <div class="brand"><span class="brand-mark">M</span>MYBILL</div>
         <p class="tagline">Your Personal Finance OS</p>
+        ${driveConfigured ? `
+        <div class="restore-box">
+          <p class="muted small">Already using MYBILL on another device?</p>
+          <button type="button" id="restore-drive-btn" class="btn-ghost btn-block">Restore from Google Drive</button>
+          <p class="muted small" id="restore-status"></p>
+        </div>
+        <div class="divider"><span>or start fresh</span></div>` : ''}
         <form id="onboard-form" class="onboard-form">
           <label>Your name<input name="name" required placeholder="e.g. Aditi"></label>
           <label>Currency
@@ -74,6 +82,32 @@
       finishOnboarding(f);
     });
     document.getElementById('skip-onboard').addEventListener('click', () => finishOnboarding(new FormData()));
+    if (driveConfigured) {
+      document.getElementById('restore-drive-btn').addEventListener('click', async () => {
+        const statusEl = document.getElementById('restore-status');
+        const btn = document.getElementById('restore-drive-btn');
+        btn.disabled = true; btn.textContent = 'Connecting…';
+        statusEl.textContent = '';
+        try {
+          if (!window.MyBillDrive.isConnected()) await window.MyBillDrive.connect();
+          statusEl.textContent = 'Looking for your data…';
+          const found = await window.MyBillDrive.restoreFromDrive();
+          if (found) {
+            statusEl.textContent = 'Data restored — loading your MYBILL…';
+            renderShell();
+            window.addEventListener('hashchange', router);
+            location.hash = '#dashboard';
+            router();
+          } else {
+            statusEl.textContent = 'No existing MYBILL data found in this Google account\'s Drive. You can start fresh below.';
+            btn.disabled = false; btn.textContent = 'Restore from Google Drive';
+          }
+        } catch (err) {
+          statusEl.textContent = 'Could not connect: ' + (err && err.message ? err.message : 'unknown error');
+          btn.disabled = false; btn.textContent = 'Restore from Google Drive';
+        }
+      });
+    }
   }
 
   function finishOnboarding(f) {
@@ -895,8 +929,11 @@
       <h3>Google Drive</h3>
       ${driveConfigured
         ? `<p class="muted">${driveConnected ? 'Connected — your data syncs to your Drive automatically.' : 'Not connected yet.'}</p>
-           <button class="btn-primary" id="drive-connect">${driveConnected ? 'Disconnect' : 'Connect Google Drive'}</button>`
-        : `<p class="muted">Add your Google OAuth Client ID to <code>js/config.js</code> to enable Drive sync. See SETUP.md for the exact steps.</p>`}
+           <div class="card-actions">
+             <button class="btn-primary" id="drive-connect">${driveConnected ? 'Disconnect' : 'Connect Google Drive'}</button>
+             ${driveConnected ? `<button class="btn-ghost" id="drive-restore">Restore from Drive</button>` : ''}
+           </div>`
+        : `<p class="muted">Add your Google OAuth Client ID to <code>config.js</code> to enable Drive sync. See SETUP.md for the exact steps.</p>`}
     </section>
     <section class="card">
       <h3>Backup &amp; export</h3>
@@ -930,7 +967,21 @@
       document.getElementById('drive-connect').addEventListener('click', async () => {
         if (driveConnected) { window.MyBillDrive.disconnect(); router(); return; }
         try { await window.MyBillDrive.connect(); toast('Connected to Google Drive'); router(); }
-        catch (e) { toast('Could not connect: ' + e.message); }
+        catch (e) { toast('Could not connect: ' + (e && e.message ? e.message : 'unknown error')); }
+      });
+      const restoreBtn = document.getElementById('drive-restore');
+      if (restoreBtn) restoreBtn.addEventListener('click', () => {
+        modal('Restore from Google Drive?', `<p>This replaces the data currently on this device with whatever is saved in your MYBILL Google Drive folder. Anything added on this device since the last sync that hasn't reached Drive yet will be lost.</p>`,
+          `<button class="btn-ghost" id="restore-cancel">Cancel</button><button class="btn-primary" id="restore-confirm">Restore</button>`);
+        document.getElementById('restore-cancel').addEventListener('click', closeModal);
+        document.getElementById('restore-confirm').addEventListener('click', async () => {
+          closeModal();
+          try {
+            const found = await window.MyBillDrive.restoreFromDrive();
+            if (found) { toast('Data restored from Drive'); router(); }
+            else toast('No data found in Drive for this account');
+          } catch (e) { toast('Restore failed: ' + e.message); }
+        });
       });
     }
   }
